@@ -1,44 +1,37 @@
 name: GitHub Trending 每日解读
-
 on:
   schedule:
-    # cron 用的是 UTC 时间。00:00 UTC = 北京时间 08:00
-    # 想改成北京时间 07:00 就写 '0 23 * * *'（前一天 23:00 UTC）
-    - cron: '25 18 * * *'
+    # cron 用的是 UTC 时间。19:30 UTC = 墨尔本 AEST(UTC+10) 次日 05:30
+    # 注意：墨尔本夏令时(10月初~4月初, AEDT=UTC+11)期间，这个时间会变成当地 06:30
+    # 夏令时期间想保持 05:30，需改成 '30 18 * * *'
+    - cron: '30 19 * * *'
   workflow_dispatch:   # 允许在网页上手动点一下就跑，方便测试
-
 permissions:
   contents: read
   issues: write
-
 jobs:
   digest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
         with:
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: |
             --max-turns 40
             --allowedTools "WebFetch,Read,Write,Bash(gh issue create:*),Bash(date:*),Bash(cat:*)"
           prompt: |
             你要生成一份 GitHub Trending 的每日中文解读，读者是一名 **AI Agent 方向的入门学习者, 你不能刻意炫自己的理论水平有多高，而是较为详细地带着读者理解项目，提高技术水平**。
-
             ## 步骤
-
             1. 用 WebFetch 抓取 https://github.com/trending （Today、全部语言），
                提取**前三名**仓库的：全名（owner/repo）、主语言、总 star 数、今日新增 star 数、官方一句话描述。
-
             2. 对这三个仓库，分别抓取它们的 README 来真正理解项目内容：
                先试 https://raw.githubusercontent.com/<owner>/<repo>/main/README.md ，
                404 就再试 master 分支。抓不到就退回用仓库主页。
-
             3. 写一份 Markdown 解读，结构如下：
-
                - **前三名总览**：一个表格（排名 / 项目链接 / 语言 / stars / 今日新增 / 一句话），
                  表格后面用两三句话点出今天这三个项目**共同反映出什么趋势**。
                - **第 2 名、第 3 名**：各一小节，说清楚它解决什么问题、怎么解决的，
@@ -54,17 +47,12 @@ jobs:
                    上下文工程、MCP、验证闭环、token 成本控制等——但只写这个项目**真正涉及**的，不要硬凑。
                  * 最后给一段「如果我要照着它学，该按什么顺序学」的建议
                - **结尾**：一个三列对比表，把三个项目放在一起看。
-
             4. 把这份 Markdown 用 gh CLI 发布成本仓库的一个 issue：
-
-               ```
+```
                gh issue create --title "GitHub Trending 解读 · $(date -u +%Y-%m-%d)" --body-file <文件路径>
-               ```
-
+```
                先把正文用 Write 工具写到 /tmp/digest.md，再用 --body-file 引用，避免转义问题。
-
             ## 要求
-
             - 全文中文。
             - 内容必须具体：给真实命令、真实数字、真实结论。禁止写「这体现了 AI 的强大」这类空话。
             - 如果某个项目和 AI Agent 完全无关（比如是个字体库），照样如实介绍，
