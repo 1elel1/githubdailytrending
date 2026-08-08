@@ -48,9 +48,7 @@ jobs:
                  * 最后给一段「如果我要照着它学，该按什么顺序学」的建议
                - **结尾**：一个三列对比表，把三个项目放在一起看。
             4. 把这份 Markdown 用 gh CLI 发布成本仓库的一个 issue：
-```
                gh issue create --title "GitHub Trending 解读 · $(date -u +%Y-%m-%d)" --body-file <文件路径>
-```
                先把正文用 Write 工具写到 /tmp/digest.md，再用 --body-file 引用，避免转义问题。
             ## 要求
             - 全文中文。
