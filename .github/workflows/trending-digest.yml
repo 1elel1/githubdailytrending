@@ -14,6 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: 生成日期标签（issue 标题和邮件标题共用）
+        id: date
+        run: echo "value=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,3 +62,32 @@ jobs:
             - 如果某个项目和 AI Agent 完全无关（比如是个字体库），照样如实介绍，
               但把「对 Agent 入门者的启发」换成一句诚实的说明，不要强行关联。
             - 只做上面这些事。不要修改仓库里的任何文件，不要提交代码，不要开 PR。
+
+      - name: 生成邮件正文（Markdown → HTML）
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq pandoc
+          cp /tmp/digest.md "$GITHUB_WORKSPACE/digest.md"
+          pandoc -f gfm -t html "$GITHUB_WORKSPACE/digest.md" -o "$GITHUB_WORKSPACE/digest.html"
+
+      - name: 通过 Resend API 发送邮件
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          jq -n \
+            --arg from "GitHub Trending Bot <onboarding@resend.dev>" \
+            --arg to "brucelelele2000@outlook.com" \
+            --arg subject "GitHub Trending 解读 · ${{ steps.date.outputs.value }}" \
+            --rawfile html "$GITHUB_WORKSPACE/digest.html" \
+            '{from:$from, to:[$to], subject:$subject, html:$html}' > /tmp/resend_payload.json
+
+          http_status=$(curl -sS -o /tmp/resend_response.json -w '%{http_code}' \
+            -X POST 'https://api.resend.com/emails' \
+            -H "Authorization: Bearer $RESEND_API_KEY" \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/resend_payload.json)
+
+          cat /tmp/resend_response.json
+          if [ "$http_status" -ge 300 ]; then
+            echo "Resend 返回了非成功状态码: $http_status"
+            exit 1
+          fi
