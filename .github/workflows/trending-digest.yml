@@ -4,7 +4,7 @@ on:
   schedule:
     # cron 用的是 UTC 时间。00:00 UTC = 北京时间 08:00
     # 想改成北京时间 07:00 就写 '0 23 * * *'（前一天 23:00 UTC）
-    - cron: '0 0 * * *'
+    - cron: '25 18 * * *'
   workflow_dispatch:   # 允许在网页上手动点一下就跑，方便测试
 
 permissions:
