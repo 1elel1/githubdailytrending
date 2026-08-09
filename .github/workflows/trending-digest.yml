@@ -6,11 +6,15 @@ on:
     # 注意：墨尔本夏令时(10月初~4月初, AEDT=UTC+11)期间，这个时间会变成当地 06:30
     # 夏令时期间想保持 05:30，需改成 '30 18 * * *'
     - cron: '30 19 * * *'
-    # 补跑：4 小时后再试一次，专治第一次因额度耗尽/网络抖动失败的情况。
-    # 同一 UTC 日内如果已经发过 issue，下面的「检查今天是否已发过」会让它整个跳过。
-    # 注意 19:30 和 23:30 属于同一个 UTC 日，所以日期标签一致，去重才成立。
-    - cron: '30 23 * * *'
+    # 下面三次是补跑，专治订阅额度的 5 小时窗口被占满导致的 429。
+    # 四次尝试横跨 6 小时，必定跨过一次窗口重置。
+    # 日期标签用的是墨尔本时区（见下面的 date 步骤），所以这四次映射到同一个「墨尔本日」，
+    # 已经发过 issue 的话后面几次会整个跳过，不会重复发。
+    - cron: '30 21 * * *'   # 墨尔本 07:30
+    - cron: '30 23 * * *'   # 墨尔本 09:30
+    - cron: '30 1 * * *'    # 墨尔本 11:30（UTC 已翻页，但墨尔本仍是同一天）
   workflow_dispatch:   # 允许在网页上手动点一下就跑，方便测试
+                       # ⚠️ 每点一次都实打实消耗订阅额度，别拿它当调试手段
 
 permissions:
   contents: read
@@ -29,7 +33,10 @@ jobs:
 
       - name: 生成日期标签（issue 标题和邮件标题共用）
         id: date
-        run: echo "value=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+        # 用墨尔本时区而不是 UTC：
+        # 1) 让 19:30~01:30 UTC 这四次补跑落在同一个日期标签上，去重才成立
+        # 2) 标题上的日期跟你早上读到它的当地日期一致
+        run: echo "value=$(TZ=Australia/Melbourne date +%F)" >> "$GITHUB_OUTPUT"
 
       - name: 检查今天是否已发过
         id: check
@@ -44,7 +51,7 @@ jobs:
           count=$(gh issue list --state all --limit 30 --json title \
             --jq "[.[] | select(.title | contains(\"$DATE\"))] | length")
           if [ "$count" -gt 0 ]; then
-            echo "::notice::今天($DATE)的解读已经发过了，跳过本次运行"
+            echo "::notice::$DATE 的解读已经发过了，跳过本次运行"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -58,17 +65,17 @@ jobs:
         with:
           github_token: ${{ github.token }}
 
-          # ── 鉴权方式（二选一，不要同时设，同时设时静态凭证优先，行为会很迷惑）──
-          # 推荐：API key 按 token 计费，只受 RPM/TPM 限制，不吃个人订阅的 5 小时窗口，
-          # 不会因为你白天自己用 Claude Code 而把定时任务饿死。
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # 想继续白嫖订阅额度，就注释掉上面一行、打开下面这行：
-          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # 用订阅额度。注意它和你本地跑 Claude Code 共享同一个 5 小时滚动窗口，
+          # 所以务必去 Claude 设置里把 extra usage 打开——否则额度一满就是硬 429，
+          # 日志里会看到 overageDisabledReason: "org_level_disabled"。
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # 哪天嫌撞车太频繁，注释掉上面一行、换成下面这行即可（二选一，不要同时设）：
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
           show_full_output: true
           claude_args: |
             --max-turns 20
-            --allowedTools "WebFetch,Read,Write,Bash(gh issue create:*),Bash(date:*),Bash(cat:*)"
+            --allowedTools "WebFetch,Read,Write,Bash(gh issue create:*),Bash(cat:*)"
           prompt: |
             你要生成一份 GitHub Trending 的每日中文解读，读者是一名 **AI Agent 方向的入门学习者, 你不能刻意炫自己的理论水平有多高，而是较为详细地带着读者理解项目，提高技术水平**。
             ## 步骤
@@ -93,9 +100,10 @@ jobs:
                    上下文工程、MCP、验证闭环、token 成本控制等——但只写这个项目**真正涉及**的，不要硬凑。
                  * 最后给一段「如果我要照着它学，该按什么顺序学」的建议
                - **结尾**：一个三列对比表，把三个项目放在一起看。
-            4. 把这份 Markdown 用 gh CLI 发布成本仓库的一个 issue：
-               gh issue create --title "GitHub Trending 解读 · $(date -u +%Y-%m-%d)" --body-file <文件路径>
+            4. 把这份 Markdown 用 gh CLI 发布成本仓库的一个 issue。
                先把正文用 Write 工具写到 /tmp/digest.md，再用 --body-file 引用，避免转义问题。
+               标题里的日期**必须**用下面这个现成的值，不要自己调 date 命令算：
+               gh issue create --title "GitHub Trending 解读 · ${{ steps.date.outputs.value }}" --body-file /tmp/digest.md
             ## 要求
             - 全文中文。
             - 内容必须具体：给真实命令、真实数字、真实结论。禁止写「这体现了 AI 的强大」这类空话。
@@ -151,7 +159,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: digest-${{ steps.date.outputs.value }}
-          path: |
-            /tmp/digest.md
+          path: /tmp/digest.md
           if-no-files-found: ignore
           retention-days: 7
