@@ -1,14 +1,26 @@
 name: GitHub Trending 每日解读
+
 on:
   schedule:
     # cron 用的是 UTC 时间。19:30 UTC = 墨尔本 AEST(UTC+10) 次日 05:30
     # 注意：墨尔本夏令时(10月初~4月初, AEDT=UTC+11)期间，这个时间会变成当地 06:30
     # 夏令时期间想保持 05:30，需改成 '30 18 * * *'
     - cron: '30 19 * * *'
+    # 补跑：4 小时后再试一次，专治第一次因额度耗尽/网络抖动失败的情况。
+    # 同一 UTC 日内如果已经发过 issue，下面的「检查今天是否已发过」会让它整个跳过。
+    # 注意 19:30 和 23:30 属于同一个 UTC 日，所以日期标签一致，去重才成立。
+    - cron: '30 23 * * *'
   workflow_dispatch:   # 允许在网页上手动点一下就跑，方便测试
+
 permissions:
   contents: read
   issues: write
+
+# 防止「定时触发」和「手动触发」撞在一起，重复发 issue 和邮件
+concurrency:
+  group: trending-digest
+  cancel-in-progress: false
+
 jobs:
   digest:
     runs-on: ubuntu-latest
@@ -19,15 +31,43 @@ jobs:
         id: date
         run: echo "value=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      - uses: anthropics/claude-code-action@v1
+      - name: 检查今天是否已发过
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DATE: ${{ steps.date.outputs.value }}
+        run: |
+          # 故意不用 `gh issue list --search`：GitHub 的搜索索引有延迟，
+          # 补跑时刚发的 issue 可能还搜不到，会导致重复发。
+          # 直接列最近 30 条走 REST API，本地用 jq 过滤，实时且可靠。
+          count=$(gh issue list --state all --limit 30 --json title \
+            --jq "[.[] | select(.title | contains(\"$DATE\"))] | length")
+          if [ "$count" -gt 0 ]; then
+            echo "::notice::今天($DATE)的解读已经发过了，跳过本次运行"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 生成解读并发布 issue
+        if: steps.check.outputs.skip == 'false'
+        uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
         with:
           github_token: ${{ github.token }}
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # ── 鉴权方式（二选一，不要同时设，同时设时静态凭证优先，行为会很迷惑）──
+          # 推荐：API key 按 token 计费，只受 RPM/TPM 限制，不吃个人订阅的 5 小时窗口，
+          # 不会因为你白天自己用 Claude Code 而把定时任务饿死。
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 想继续白嫖订阅额度，就注释掉上面一行、打开下面这行：
+          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
           show_full_output: true
           claude_args: |
-            --max-turns 40
+            --max-turns 20
             --allowedTools "WebFetch,Read,Write,Bash(gh issue create:*),Bash(date:*),Bash(cat:*)"
           prompt: |
             你要生成一份 GitHub Trending 的每日中文解读，读者是一名 **AI Agent 方向的入门学习者, 你不能刻意炫自己的理论水平有多高，而是较为详细地带着读者理解项目，提高技术水平**。
@@ -61,15 +101,28 @@ jobs:
             - 内容必须具体：给真实命令、真实数字、真实结论。禁止写「这体现了 AI 的强大」这类空话。
             - 如果某个项目和 AI Agent 完全无关（比如是个字体库），照样如实介绍，
               但把「对 Agent 入门者的启发」换成一句诚实的说明，不要强行关联。
+            - **/tmp/digest.md 是后续发邮件步骤的输入**，发完 issue 后不要删除或清空它。
             - 只做上面这些事。不要修改仓库里的任何文件，不要提交代码，不要开 PR。
 
       - name: 生成邮件正文（Markdown → HTML）
+        if: steps.check.outputs.skip == 'false'
         run: |
+          # 显式检查，避免 Claude 因额度/超时中断时，这里抛出一句莫名其妙的
+          # "cp: cannot stat '/tmp/digest.md': No such file or directory"
+          if [ ! -s /tmp/digest.md ]; then
+            echo "::error::Claude 未生成 /tmp/digest.md（文件不存在或为空），跳过发信"
+            exit 1
+          fi
           sudo apt-get update -qq && sudo apt-get install -y -qq pandoc
           cp /tmp/digest.md "$GITHUB_WORKSPACE/digest.md"
           pandoc -f gfm -t html "$GITHUB_WORKSPACE/digest.md" -o "$GITHUB_WORKSPACE/digest.html"
+          if [ ! -s "$GITHUB_WORKSPACE/digest.html" ]; then
+            echo "::error::pandoc 产出的 HTML 为空"
+            exit 1
+          fi
 
       - name: 通过 Resend API 发送邮件
+        if: steps.check.outputs.skip == 'false'
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: |
@@ -88,6 +141,17 @@ jobs:
 
           cat /tmp/resend_response.json
           if [ "$http_status" -ge 300 ]; then
-            echo "Resend 返回了非成功状态码: $http_status"
+            echo "::error::Resend 返回了非成功状态码: $http_status"
             exit 1
           fi
+
+      # 即使发信失败，也能从 Actions 页面把当天的 Markdown 下载下来，方便排查
+      - name: 上传 digest 存档
+        if: always() && steps.check.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ steps.date.outputs.value }}
+          path: |
+            /tmp/digest.md
+          if-no-files-found: ignore
+          retention-days: 7
